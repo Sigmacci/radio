@@ -162,7 +162,8 @@ bool play_song(Client &client)
 void show_queue(Client &client)
 {
 	int i = 1;
-	std::queue<std::string> temp_queue = client.awaiting_songs;
+	std::queue<std::string> temp_queue;
+	std::copy(client.awaiting_songs.front(), client.awaiting_songs.back(), std::back_inserter(temp_queue));
 	std::string queue_str = "";
 	while (!temp_queue.empty())
 	{
@@ -170,7 +171,7 @@ void show_queue(Client &client)
 		temp_queue.pop();
 	}
 
-	if (sendto(client.send_fd, queue_str.c_str(), queue_str.size(), 0, NULL, 0) == -1)
+	if (sendto(client.send_fd, queue_str.c_str(), queue_str.size(), 0, (struct sockaddr *) &(client.broadcast_addr), sizeof(client.broadcast_addr)) == -1)
 	{
 		perror("Couldn't send queue");
 	}
