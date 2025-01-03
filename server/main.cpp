@@ -52,7 +52,7 @@ void handle_client(int fd);
 
 int main()
 {
-	int sfd;
+    int sfd;
 
 	sfd = socket(PF_INET, SOCK_DGRAM, 0);
 	if (sfd == -1)
@@ -82,7 +82,7 @@ int main()
 
 void load_song_names(std::unordered_map<std::string, std::string> &song_names)
 {
-	return;
+    return;
 }
 
 void receive_cmds(Client &client)
