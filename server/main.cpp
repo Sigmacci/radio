@@ -14,6 +14,9 @@
 #include <fstream>
 #include <mutex>
 #include <condition_variable>
+#include <algorithm>
+#include <sstream>
+#include <iomanip>
 
 #define CONNECTION_QUEUE_LENGTH 50
 #define BUFFER_SIZE 256
@@ -22,7 +25,6 @@
 
 #define SERVER_PORT 1234
 #define CLIENT_PORT 1235
-#define BROADCAST_PORT 1236
 
 class Client
 {
@@ -33,26 +35,291 @@ public:
 	}
 	int send_fd;
 	int communication_fd;
-	struct sockaddr_in broadcast_addr;
+	std::vector<struct sockaddr_in> clients;
 	std::queue<std::string> awaiting_songs;					  // queue of songs to be played
 	std::unordered_map<std::string, std::string> song_names;  // maps song names to file names
 	std::queue<std::pair<std::string, std::string>> commands; // queue of pairs command-argument
 	std::string current_song_name;
+
 	std::unique_ptr<std::ifstream> current_song;
-	std::mutex queue_mutex;
-	std::condition_variable queue_cv;
+
 	bool playing = false;
 };
 
-void receive_cmds(Client &client);
-void add_song_to_queue(const std::string &song_name, Client &client);
-bool play_song(Client &client);
-void show_queue(Client &client);
-void handle_client(int fd);
+class ClientHandler
+{
+public:
+	explicit ClientHandler(int fd) : client(fd) {}
+
+	void handle_client()
+	{
+		// load_song_names(client.song_names);
+
+		client.communication_fd = socket(PF_INET, SOCK_STREAM, 0);
+		if (client.communication_fd == -1)
+		{
+			perror("Couldn't create communication socket");
+			return;
+		}
+
+		struct sockaddr_in communication_addr;
+		communication_addr.sin_family = AF_INET;
+		communication_addr.sin_port = htons(CLIENT_PORT);
+		communication_addr.sin_addr.s_addr = INADDR_ANY;
+
+		if (bind(client.communication_fd, (struct sockaddr *)&communication_addr, sizeof(communication_addr)) == -1)
+		{
+			perror("Couldn't bind communication socket");
+			return;
+		}
+
+		if (listen(client.communication_fd, CONNECTION_QUEUE_LENGTH) == -1)
+		{
+			perror("Couldn't listen on communication socket");
+			return;
+		}
+
+		std::thread client_thread(&ClientHandler::accept_clients_thread, this);
+		client_thread.detach();
+		while (true)
+		{
+			if (!client.playing && !client.awaiting_songs.empty())
+			{
+				client.current_song_name = client.awaiting_songs.front();
+				client.awaiting_songs.pop();
+				client.playing = true;
+				std::cout << client.current_song_name << std::endl;
+			}
+
+			if (client.playing)
+			{
+				if (!client.current_song)
+				{
+					client.current_song = std::make_unique<std::ifstream>(client.current_song_name, std::ios::in | std::ios::binary);
+				}
+				client.playing = play_song();
+			}
+
+			if (client.commands.empty())
+			{
+				continue;
+			}
+			std::pair<std::string, std::string> current_cmd = client.commands.front();
+			client.commands.pop();
+
+			auto cmd = current_cmd.first.c_str();
+
+			if (strcmp(cmd, "PLAY") == 0)
+			{
+				add_song_to_queue(current_cmd.second);
+				std::cout << "Added song to queue" << std::endl;
+			}
+			else if (strcmp(cmd, "SKIP") == 0)
+			{
+				client.current_song.reset();
+			}
+			else if (strcmp(cmd, "QUEUE") == 0)
+			{
+				show_queue();
+			}
+			else if (strcmp(cmd, "END") == 0)
+			{
+				close(client.communication_fd);
+				return;
+			}
+			else if (strcmp(cmd, "UPLOAD") == 0)
+			{
+				// upload_song(fd, &(current_cmd.second), &song_names);
+			}
+			else if (strcmp(cmd, "") != 0)
+			{
+				// unknown_cmd();
+			}
+		}
+	}
+
+private:
+	Client client;
+
+	std::mutex queue_mutex;
+	std::condition_variable queue_cv;
+
+	std::mutex clients_mutex;
+	std::condition_variable clients_cv;
+
+	void command_thread(struct sockaddr_in &client_addr)
+	{
+		while (true)
+		{
+			char buffer[BUFFER_SIZE];
+			bzero(buffer, BUFFER_SIZE);
+			socklen_t client_addr_size = sizeof(client_addr);
+			int bytes_received = recvfrom(client.send_fd, buffer, BUFFER_SIZE, 0, (struct sockaddr *)&client_addr, &client_addr_size);
+			if (bytes_received == -1)
+			{
+				perror("Couldn't receive command");
+				return;
+			}
+			else if (bytes_received == 0)
+			{
+				break;
+			}
+
+			std::string cmd(buffer);
+			cmd = cmd.substr(0, bytes_received);
+			std::string arg = "";
+			if (cmd.find(" ") != std::string::npos)
+			{
+				arg = cmd.substr(cmd.find(" ") + 1);
+				cmd = cmd.substr(0, cmd.find(" "));
+			}
+
+			{
+				std::lock_guard<std::mutex> lock(queue_mutex);
+				client.commands.push(std::make_pair(cmd, arg));
+				queue_cv.notify_all();
+			}
+		}
+
+		{
+			std::lock_guard<std::mutex> lock(clients_mutex);
+			client.clients.erase(std::remove_if(client.clients.begin(), client.clients.end(), [&client_addr](const struct sockaddr_in &addr)
+												{ return addr.sin_port == client_addr.sin_port && addr.sin_addr.s_addr == client_addr.sin_addr.s_addr; }),
+								 client.clients.end());
+			clients_cv.notify_all();
+		}
+	}
+
+	void accept_clients_thread()
+	{
+		int cfd;
+		while (true)
+		{
+			cfd = accept(client.communication_fd, NULL, NULL);
+
+			struct sockaddr_in client_addr;
+			client_addr.sin_family = AF_INET;
+
+			char address[50];
+			if (recv(cfd, address, 50, 0) == -1)
+			{
+				perror("Couldn't receive client address");
+				return;
+			}
+			std::string addr_str(address);
+			client_addr.sin_addr.s_addr = inet_addr(addr_str.substr(0, addr_str.find(":")).c_str());
+			client_addr.sin_port = htons(std::stoi(addr_str.substr(addr_str.find(":") + 1, addr_str.size())));
+
+			{
+				std::lock_guard<std::mutex> lock(clients_mutex);
+				client.clients.push_back(client_addr);
+				clients_cv.notify_one();
+			}
+
+			close(cfd);
+
+			std::cout << "Client connected: " << inet_ntoa(client_addr.sin_addr) << ":" << client_addr.sin_port << std::endl;
+
+			if (cfd == -1)
+			{
+				perror("Couldn't accept connection");
+				return;
+			}
+			std::thread cmd_thread(&ClientHandler::command_thread, this, std::ref(client_addr));
+			cmd_thread.detach();
+		}
+	}
+
+	void add_song_to_queue(const std::string &song_name)
+	{
+		if (client.song_names.find(song_name) == client.song_names.end())
+		{
+			perror("Song not found");
+			return;
+		}
+		client.awaiting_songs.push(client.song_names.at(song_name));
+	}
+
+	void print_hex(const uint8_t *buffer, int length)
+	{
+		std::ofstream out("out.txt", std::ios::out | std::ios::app);
+		// std::stringstream stream;
+
+		for (int i = 0; i < length; ++i)
+		{
+			// printf("%02x ", static_cast<unsigned char>(buffer[i]));
+			printf("%02x ", buffer[i]);
+			// stream << std::hex << static_cast<unsigned char>(buffer[i]);
+			// stream << " ";
+			out << std::hex << std::uppercase // Set hexadecimal and uppercase formatting
+				<< std::setw(2)				  // Ensure at least 2 characters
+				<< std::setfill('0')		  // Pad with zeros if necessary
+				<< static_cast<int>(buffer[i]);
+
+			out << " ";
+		}
+		// out << "\n";
+		out.close();
+	}
+
+	bool play_song()
+	{
+		uint8_t buffer[CHUNK_SIZE];
+
+		if (client.current_song->eof())
+		{
+			client.current_song.reset();
+			return false;
+		}
+		// ifstream should read binary file
+		client.current_song->read(reinterpret_cast<char *>(buffer), CHUNK_SIZE);
+		// client.current_song->read(buffer, CHUNK_SIZE);
+		print_hex(buffer, CHUNK_SIZE);
+		int n = client.current_song->gcount();
+
+		for (auto &client_addr : client.clients)
+		{
+			if (sendto(client.send_fd, buffer, n, 0, (struct sockaddr *)&client_addr, sizeof(client_addr)) == -1)
+			{
+				perror("Couldn't send song chunk");
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	void show_queue()
+	{
+		int i = 1;
+		std::queue<std::string> temp_queue = client.awaiting_songs;
+		std::string queue_str = "";
+		while (!temp_queue.empty())
+		{
+			queue_str += std::to_string(i++) + ". " + temp_queue.front() + "\n";
+			temp_queue.pop();
+		}
+
+		for (auto &client_addr : client.clients)
+		{
+			if (sendto(client.send_fd, queue_str.c_str(), queue_str.size(), 0, (struct sockaddr *)&client_addr, sizeof(client_addr)) == -1)
+			{
+				perror("Couldn't send queue");
+			}
+		}
+	}
+};
+
+// void accept_clients_thread(Client &client);
+// void command_thread(int fd, Client &client, struct sockaddr_in &client_addr);
+// void add_song_to_queue(const std::string &song_name, Client &client);
+// bool play_song(Client &client);
+// void show_queue(Client &client);
+// void handle_client(int fd);
 
 int main()
 {
-    int sfd;
+	int sfd;
 
 	sfd = socket(PF_INET, SOCK_DGRAM, 0);
 	if (sfd == -1)
@@ -74,7 +341,8 @@ int main()
 
 	sleep(2);
 
-	handle_client(sfd);
+	ClientHandler handler(sfd);
+	handler.handle_client();
 
 	close(sfd);
 	return 0;
@@ -82,189 +350,5 @@ int main()
 
 void load_song_names(std::unordered_map<std::string, std::string> &song_names)
 {
-    return;
-}
-
-void receive_cmds(Client &client)
-{
-	char buffer[BUFFER_SIZE];
-
-	int cfd;
-	while (true)
-	{
-		cfd = accept(client.communication_fd, NULL, NULL);
-		if (cfd == -1)
-		{
-			perror("Couldn't accept connection");
-			return;
-		}
-
-		bzero(buffer, BUFFER_SIZE);
-		int bytes_received = recv(cfd, buffer, BUFFER_SIZE, 0);
-		if (bytes_received == -1)
-		{
-			perror("Couldn't receive command");
-			return;
-		}
-		close(cfd);
-
-		std::string cmd(buffer);
-		cmd = cmd.substr(0, bytes_received);
-		std::string arg = "";
-		if (cmd.find(" ") != std::string::npos)
-		{
-			arg = cmd.substr(cmd.find(" ") + 1);
-			cmd = cmd.substr(0, cmd.find(" "));
-		}
-
-		{
-			std::lock_guard<std::mutex> lock(client.queue_mutex);
-			client.commands.push(std::make_pair(cmd, arg));
-			client.queue_cv.notify_one();
-		}
-	}
-
-}
-
-void add_song_to_queue(const std::string &song_name, Client &client)
-{
-	if (client.song_names.find(song_name) == client.song_names.end())
-	{
-		perror("Song not found");
-		return;
-	}
-	client.awaiting_songs.push(client.song_names.at(song_name));
-}
-
-bool play_song(Client &client)
-{
-	char buffer[CHUNK_SIZE];
-
-	if (client.current_song->eof())
-	{
-		client.current_song.reset();
-		return false;
-	}
-
-	client.current_song->read(buffer, CHUNK_SIZE);
-	int n = client.current_song->gcount();
-	std::cout << "Sending " << n << " bytes" << std::endl;
-
-	if (sendto(client.send_fd, buffer, n, 0, (struct sockaddr *) &(client.broadcast_addr), sizeof(client.broadcast_addr)) == -1)
-	{
-		perror("Couldn't send song chunk");
-		return false;
-	}
-
-	return true;
-}
-
-void show_queue(Client &client)
-{
-	int i = 1;
-	std::queue<std::string> temp_queue;
-	std::copy(client.awaiting_songs.front(), client.awaiting_songs.back(), std::back_inserter(temp_queue));
-	std::string queue_str = "";
-	while (!temp_queue.empty())
-	{
-		queue_str += std::to_string(i++) + ". " + temp_queue.front() + "\n";
-		temp_queue.pop();
-	}
-
-	if (sendto(client.send_fd, queue_str.c_str(), queue_str.size(), 0, (struct sockaddr *) &(client.broadcast_addr), sizeof(client.broadcast_addr)) == -1)
-	{
-		perror("Couldn't send queue");
-	}
-}
-
-void handle_client(int fd)
-{
-	Client client(fd);
-	
-	client.broadcast_addr.sin_family = AF_INET;
-	client.broadcast_addr.sin_port = htons(BROADCAST_PORT);
-	client.broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
-	load_song_names(client.song_names);
-
-	client.communication_fd = socket(PF_INET, SOCK_STREAM, 0);
-	if (client.communication_fd == -1)
-	{
-		perror("Couldn't create communication socket");
-		return;
-	}
-
-	struct sockaddr_in communication_addr;
-	communication_addr.sin_family = AF_INET;
-	communication_addr.sin_port = htons(CLIENT_PORT);
-	communication_addr.sin_addr.s_addr = INADDR_ANY;
-
-	if (bind(client.communication_fd, (struct sockaddr *)&communication_addr, sizeof(communication_addr)) == -1)
-	{
-		perror("Couldn't bind communication socket");
-		return;
-	}
-
-	if (listen(client.communication_fd, CONNECTION_QUEUE_LENGTH) == -1)
-	{
-		perror("Couldn't listen on communication socket");
-		return;
-	}
-
-	std::thread cmd_thread(receive_cmds, std::ref(client));
-	cmd_thread.detach();
-	while (true)
-	{
-		if (!client.playing && !client.awaiting_songs.empty())
-		{
-			client.current_song_name = client.awaiting_songs.front();
-			client.awaiting_songs.pop();
-			client.playing = true;
-			std::cout << client.current_song_name << std::endl;
-		}
-
-		if (client.playing)
-		{
-			if (!client.current_song)
-			{
-				client.current_song = std::make_unique<std::ifstream>(client.current_song_name, std::ios::binary);
-			}
-			client.playing = play_song(client);
-		}
-
-		if (client.commands.empty())
-		{
-			continue;
-		}
-		std::pair<std::string, std::string> current_cmd = client.commands.front();
-		client.commands.pop();
-
-		auto cmd = current_cmd.first.c_str();
-
-		if (strcmp(cmd, "PLAY") == 0)
-		{
-			add_song_to_queue(current_cmd.second, client);
-			std::cout << "Added song to queue" << std::endl;
-		}
-		else if (strcmp(cmd, "SKIP") == 0)
-		{
-			client.current_song.reset();
-		}
-		else if (strcmp(cmd, "QUEUE") == 0)
-		{
-			show_queue(client);
-		}
-		else if (strcmp(cmd, "END") == 0)
-		{
-			close(client.communication_fd);
-			return;
-		}
-		else if (strcmp(cmd, "UPLOAD") == 0)
-		{
-			// upload_song(fd, &(current_cmd.second), &song_names);
-		}
-		else if (strcmp(cmd, "") != 0)
-		{
-			// unknown_cmd();
-		}
-	}
+	return;
 }
