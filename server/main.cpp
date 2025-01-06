@@ -20,7 +20,7 @@
 
 #define CONNECTION_QUEUE_LENGTH 50
 #define BUFFER_SIZE 256
-#define CHUNK_SIZE 1024
+#define CHUNK_SIZE 8000
 #define SONGS_DIR "songs/"
 
 #define SERVER_PORT 1234
@@ -35,7 +35,7 @@ public:
 	}
 	int send_fd;
 	int communication_fd;
-	std::vector<struct sockaddr_in> clients;
+	std::vector<std::pair<struct sockaddr_in, bool>> clients;
 	std::queue<std::string> awaiting_songs;					  // queue of songs to be played
 	std::unordered_map<std::string, std::string> song_names;  // maps song names to file names
 	std::queue<std::pair<std::string, std::string>> commands; // queue of pairs command-argument
@@ -167,6 +167,16 @@ private:
 
 			std::string cmd(buffer);
 			cmd = cmd.substr(0, bytes_received);
+
+			if (strcmp(cmd.c_str(), "ACK") == 0)
+			{
+				std::lock_guard<std::mutex> lock(clients_mutex);
+				client.clients.at(std::distance(client.clients.begin(), std::find_if(client.clients.begin(), client.clients.end(), [&client_addr](const std::pair<struct sockaddr_in, bool> &addr)
+																					 { return addr.first.sin_port == client_addr.sin_port && addr.first.sin_addr.s_addr == client_addr.sin_addr.s_addr; })))
+					.second = true;
+				clients_cv.notify_all();
+			}
+
 			std::string arg = "";
 			if (cmd.find(" ") != std::string::npos)
 			{
@@ -183,8 +193,8 @@ private:
 
 		{
 			std::lock_guard<std::mutex> lock(clients_mutex);
-			client.clients.erase(std::remove_if(client.clients.begin(), client.clients.end(), [&client_addr](const struct sockaddr_in &addr)
-												{ return addr.sin_port == client_addr.sin_port && addr.sin_addr.s_addr == client_addr.sin_addr.s_addr; }),
+			client.clients.erase(std::remove_if(client.clients.begin(), client.clients.end(), [&client_addr](const std::pair<struct sockaddr_in, bool> &addr)
+												{ return addr.first.sin_port == client_addr.sin_port && addr.first.sin_addr.s_addr == client_addr.sin_addr.s_addr; }),
 								 client.clients.end());
 			clients_cv.notify_all();
 		}
@@ -201,7 +211,7 @@ private:
 			client_addr.sin_family = AF_INET;
 
 			char address[50];
-			if (recv(cfd, address, 50, 0) == -1)
+			if (recv(cfd, address, sizeof(address), 0) == -1)
 			{
 				perror("Couldn't receive client address");
 				return;
@@ -212,7 +222,7 @@ private:
 
 			{
 				std::lock_guard<std::mutex> lock(clients_mutex);
-				client.clients.push_back(client_addr);
+				client.clients.push_back(std::make_pair(client_addr, true));
 				clients_cv.notify_one();
 			}
 
@@ -242,24 +252,10 @@ private:
 
 	void print_hex(const uint8_t *buffer, int length)
 	{
-		std::ofstream out("out.txt", std::ios::out | std::ios::app);
-		// std::stringstream stream;
-
 		for (int i = 0; i < length; ++i)
 		{
-			// printf("%02x ", static_cast<unsigned char>(buffer[i]));
 			printf("%02x ", buffer[i]);
-			// stream << std::hex << static_cast<unsigned char>(buffer[i]);
-			// stream << " ";
-			out << std::hex << std::uppercase // Set hexadecimal and uppercase formatting
-				<< std::setw(2)				  // Ensure at least 2 characters
-				<< std::setfill('0')		  // Pad with zeros if necessary
-				<< static_cast<int>(buffer[i]);
-
-			out << " ";
 		}
-		// out << "\n";
-		out.close();
 	}
 
 	bool play_song()
@@ -271,19 +267,21 @@ private:
 			client.current_song.reset();
 			return false;
 		}
-		// ifstream should read binary file
+
 		client.current_song->read(reinterpret_cast<char *>(buffer), CHUNK_SIZE);
 		// client.current_song->read(buffer, CHUNK_SIZE);
-		print_hex(buffer, CHUNK_SIZE);
+		// print_hex(buffer, CHUNK_SIZE);
 		int n = client.current_song->gcount();
 
 		for (auto &client_addr : client.clients)
 		{
-			if (sendto(client.send_fd, buffer, n, 0, (struct sockaddr *)&client_addr, sizeof(client_addr)) == -1)
+			while (!client_addr.second);
+			if (sendto(client.send_fd, buffer, n, 0, (struct sockaddr *)&client_addr.first, sizeof(client_addr.first)) == -1)
 			{
 				perror("Couldn't send song chunk");
 				return false;
 			}
+			client_addr.second = false;
 		}
 
 		return true;
@@ -309,13 +307,6 @@ private:
 		}
 	}
 };
-
-// void accept_clients_thread(Client &client);
-// void command_thread(int fd, Client &client, struct sockaddr_in &client_addr);
-// void add_song_to_queue(const std::string &song_name, Client &client);
-// bool play_song(Client &client);
-// void show_queue(Client &client);
-// void handle_client(int fd);
 
 int main()
 {
