@@ -20,7 +20,7 @@
 
 #define CONNECTION_QUEUE_LENGTH 50
 #define BUFFER_SIZE 256
-#define CHUNK_SIZE 8000
+#define CHUNK_SIZE 160000
 #define SONGS_DIR "songs/"
 #define HEADAERS "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n"
 
@@ -35,7 +35,7 @@ public:
         song_names.insert(std::make_pair("song1", "songs/aye.mp3"));
     }
     int send_fd;
-    std::unordered_map<int, bool> clients;
+    std::unordered_map<int, bool> clients;                    // (fd,ready)
     std::queue<std::string> awaiting_songs;                   // queue of songs to be played
     std::unordered_map<std::string, std::string> song_names;  // maps song names to file names
     std::queue<std::pair<std::string, std::string>> commands; // queue of pairs command-argument
@@ -57,65 +57,65 @@ public:
 
         std::thread client_thread(&ClientHandler::accept_clients_thread, this);
         client_thread.detach();
+        std::thread play_thread(&ClientHandler::play_thread, this);
+        play_thread.detach();
         while (true)
         {
-            if (!client.playing && !client.awaiting_songs.empty())
+            if (client.commands.empty())
             {
-                client.current_song_name = client.awaiting_songs.front();
-                client.awaiting_songs.pop();
-                client.playing = true;
-                std::cout << client.current_song_name << std::endl;
+                continue;
             }
+            std::pair<std::string, std::string> current_cmd = client.commands.front();
+            client.commands.pop();
 
-            if (client.playing)
+            auto cmd = current_cmd.first.c_str();
+
+            if (strcmp(cmd, "PLAY") == 0)
             {
-                if (!client.current_song)
+                std::lock_guard<std::mutex> lock(queue_mutex);
+                if (client.song_names.find(current_cmd.second) == client.song_names.end())
                 {
-                    client.current_song = std::make_unique<std::ifstream>(client.current_song_name, std::ios::in | std::ios::binary);
-                }
-                client.playing = play_song();
-            }
-
-            {
-                std::unique_lock<std::mutex> lock(queue_mutex);
-
-                if (client.commands.empty())
-                {
-                    lock.unlock();
+                    perror("Song not found");
                     continue;
                 }
-                std::pair<std::string, std::string> current_cmd = client.commands.front();
-                client.commands.pop();
+                client.awaiting_songs.push(client.song_names.at(current_cmd.second));
                 queue_cv.notify_one();
-
-                auto cmd = current_cmd.first.c_str();
-
-                if (strcmp(cmd, "PLAY") == 0)
+                std::cout << "Added song to queue" << std::endl;
+            }
+            else if (strcmp(cmd, "SKIP") == 0)
+            {
                 {
-                    add_song_to_queue(current_cmd.second);
-                    std::cout << "Added song to queue" << std::endl;
+                    std::lock_guard<std::mutex> lock(play_mutex);
+                    client.playing = false;
+                    play_cv.notify_one();
                 }
-                else if (strcmp(cmd, "SKIP") == 0)
+                std::lock_guard<std::mutex> lock(clients_mutex);
+                for (auto &client_addr : client.clients)
                 {
-                    client.current_song.reset();
+                    client_addr.second = true;
                 }
-                else if (strcmp(cmd, "QUEUE") == 0)
-                {
-                    show_queue();
-                }
-                else if (strcmp(cmd, "END") == 0)
-                {
-                    close(client.send_fd);
-                    return;
-                }
-                else if (strcmp(cmd, "UPLOAD") == 0)
-                {
-                    // upload_song(fd, &(current_cmd.second), &song_names);
-                }
-                else if (strcmp(cmd, "") != 0)
-                {
-                    // unknown_cmd();
-                }
+                clients_cv.notify_one();
+            }
+            else if (strcmp(cmd, "QUEUE") == 0)
+            {
+                show_queue();
+            }
+            else if (strcmp(cmd, "END") == 0)
+            {
+                close(client.send_fd);
+                return;
+            }
+            else if (strcmp(cmd, "UPLOAD") == 0)
+            {
+                // upload_song(fd, &(current_cmd.second), &song_names);
+            }
+            else if (strcmp(cmd, "TRACKS") == 0)
+            {
+                send_track_list();
+            }
+            else if (strcmp(cmd, "") != 0)
+            {
+                // unknown_cmd();
             }
         }
     }
@@ -128,6 +128,9 @@ private:
 
     std::mutex clients_mutex;
     std::condition_variable clients_cv;
+
+    std::mutex play_mutex;
+    std::condition_variable play_cv;
 
     void command_thread(int fd)
     {
@@ -150,11 +153,12 @@ private:
             std::string cmd(buffer);
             cmd = cmd.substr(0, bytes_received);
 
-            if (strcmp(cmd.c_str(), "ACK") == 0)
+            if (strcmp(cmd.c_str(), "NEXT") == 0)
             {
                 std::lock_guard<std::mutex> lock(clients_mutex);
                 client.clients.at(fd) = true;
                 clients_cv.notify_one();
+                std::cout << "Received NEXT" << std::endl;
                 continue;
             }
 
@@ -221,59 +225,158 @@ private:
         }
     }
 
-    bool play_song()
+    // bool play_song()
+    // {
+    //     char buffer[CHUNK_SIZE];
+
+    //     while (!client.current_song->eof())
+    //     {
+    //         client.current_song->read(buffer, CHUNK_SIZE);
+    //         int n = client.current_song->gcount();
+    //         {
+    //             std::unique_lock<std::mutex> lock(clients_mutex);
+    //             for (auto &client_addr : client.clients)
+    //             {
+    //                 std::cout << "Sending song chunk" << std::endl;
+    //                 if (send(client_addr.first, buffer, n, 0) == -1)
+    //                 {
+    //                     perror("Couldn't send song chunk");
+    //                     return false;
+    //                 }
+    //             }
+    //             clients_cv.notify_one();
+    //         }
+    //     }
+    //     client.current_song.reset();
+
+    //     return false;
+    // }
+
+    void play_thread()
     {
-        uint8_t buffer[CHUNK_SIZE];
-
-        if (client.current_song->eof())
+        bool skip = false;
+        while (true)
         {
-            client.current_song.reset();
-            return false;
-        }
-
-        client.current_song->read(reinterpret_cast<char *>(buffer), CHUNK_SIZE);
-        // client.current_song->read(buffer, CHUNK_SIZE);
-        // print_hex(buffer, CHUNK_SIZE);
-        int n = client.current_song->gcount();
-
-        {
-            std::unique_lock<std::mutex> lock(clients_mutex);
-            for (auto &client_addr : client.clients)
             {
-                clients_cv.wait(lock, [&] {
-                    return client_addr.second; 
-                });
-                if (send(client_addr.first, buffer, n, 0) == -1)
+                std::unique_lock<std::mutex> client_lock(clients_mutex);
+                for (auto &client_addr : client.clients)
                 {
-                    perror("Couldn't send song chunk");
-                    return false;
+                    if (!client_addr.second)
+                    {
+                        skip = true;
+                        client_lock.unlock();
+                        break;
+                    }
                 }
-                clients_cv.notify_one();
-                client_addr.second = false;
+            }
+            if (skip)
+            {
+                skip = false;
+                continue;
+            }
+            {
+                std::unique_lock<std::mutex> lock(queue_mutex);
+                queue_cv.wait(lock, [this]
+                              { return !client.awaiting_songs.empty(); });
+                queue_cv.notify_one();
+            }
+            {
+                std::lock_guard<std::mutex> lock(play_mutex);
+                client.current_song_name = client.awaiting_songs.front();
+                client.awaiting_songs.pop();
+                client.playing = true;
+                client.current_song = std::make_unique<std::ifstream>(client.current_song_name, std::ios::in | std::ios::binary);
+                play_cv.notify_one();
+            }
+            char buffer[CHUNK_SIZE];
+
+            while (true)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(play_mutex);
+                    if (!client.playing || client.current_song->eof())
+                    {
+                        play_cv.notify_one();
+                        break;
+                    }
+                }
+                play_cv.notify_one();
+                client.current_song->read(buffer, CHUNK_SIZE);
+                int n = client.current_song->gcount();
+                {
+                    std::unique_lock<std::mutex> lock(clients_mutex);
+                    for (auto &client_addr : client.clients)
+                    {
+                        std::cout << "Sending song chunk" << std::endl;
+                        if (send(client_addr.first, buffer, n, 0) == -1)
+                        {
+                            perror("Couldn't send song chunk");
+                        }
+                    }
+                    clients_cv.notify_one();
+                }
+            }
+            {
+                std::lock_guard<std::mutex> lock(play_mutex);
+                client.current_song->close();
+                client.current_song.reset();
+                client.playing = false;
+                play_cv.notify_one();
             }
         }
+    }
 
-        return true;
+    void send_track_list()
+    {
+        std::unique_lock<std::mutex> lock(play_mutex);
+        play_cv.wait(lock, [this]
+                     { return !client.playing; });
+        std::string track_list = "";
+        for (auto &song : client.song_names)
+        {
+            track_list += song.first + "\n";
+        }
+        std::cout << track_list << std::endl;
+
+        {
+            std::lock_guard<std::mutex> lock(clients_mutex);
+            for (auto &client_addr : client.clients)
+            {
+                if (send(client_addr.first, track_list.c_str(), track_list.size(), 0) == -1)
+                {
+                    perror("Couldn't send track list");
+                }
+                clients_cv.notify_one();
+            }
+        }
+        play_cv.notify_one();
     }
 
     void show_queue()
     {
-        int i = 1;
+        std::unique_lock<std::mutex> lock(play_mutex);
+        play_cv.wait(lock, [this]
+                     { return !client.playing; });
         std::queue<std::string> temp_queue = client.awaiting_songs;
         std::string queue_str = "";
         while (!temp_queue.empty())
         {
-            queue_str += std::to_string(i++) + ". " + temp_queue.front() + "\n";
+            queue_str += temp_queue.front() + "\n";
             temp_queue.pop();
         }
 
-        for (auto &client_addr : client.clients)
         {
-            if (sendto(client.send_fd, queue_str.c_str(), queue_str.size(), 0, (struct sockaddr *)&client_addr, sizeof(client_addr)) == -1)
+            std::lock_guard<std::mutex> lock(clients_mutex);
+            for (auto &client_addr : client.clients)
             {
-                perror("Couldn't send queue");
+                if (sendto(client.send_fd, queue_str.c_str(), queue_str.size(), 0, (struct sockaddr *)&client_addr, sizeof(client_addr)) == -1)
+                {
+                    perror("Couldn't send queue");
+                }
+                clients_cv.notify_one();
             }
         }
+        play_cv.notify_one();
     }
 };
 
