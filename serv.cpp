@@ -101,12 +101,10 @@ void accept_audio_listener(int server_fd, struct sockaddr_in address) {
             std::ostringstream response;
             response << "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\r\n";
             send(client_socket, response.str().c_str(), response.str().length(), 0);
-            std::cout << "Sent response to audio client" << std::endl;
             {
                 std::lock_guard<std::mutex> lock(clients_mutex);
                 clients.push_back(client_socket);
             }
-            std::cout << "Added audio client to list: " << client_socket << std::endl;
         }
     }
 }
@@ -133,8 +131,7 @@ void audio_server_loop() {
             if (fs::is_regular_file(song)) {
                 std::string song_path = song.path().string();
                 std::cout << "Playing " << song_path << std::endl;
-                int bitrate = getBitrate(song_path);
-                std::cout << "Bit rate: " << bitrate << std::endl;
+                int bitrate = getBitrate(song_path) / 8;
 
                 std::ifstream file(song_path, std::ios::in | std::ios::binary);
                 char buffer[bitrate];
@@ -142,16 +139,20 @@ void audio_server_loop() {
                     int n = file.gcount();
                     {
                         std::lock_guard<std::mutex> lock(clients_mutex);
-                        for (int client_socket : clients) {
-                            if (send(client_socket, buffer, n, 0) == -1) {
+                        for (auto i = clients.begin(); i != clients.end();) {
+                            ssize_t byt = recv(*i, nullptr, 0, MSG_PEEK | MSG_DONTWAIT);
+                            if (byt == 0) {
                                 std::cout << "Client disconnected" << std::endl;
-                                clients.erase(std::remove(clients.begin(), clients.end(), client_socket), clients.end());
+                                close(*i);
+                                i = clients.erase(i);
+                                continue;
                             }
+                            send(*i, buffer, n, 0);
+                            ++i;
                         }
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1000 * 8));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                 }
-                std::cout << "Sent to all clients" << std::endl;
                 file.close();
             }
         }
@@ -159,7 +160,7 @@ void audio_server_loop() {
 }
 
 void handle_request(int client_socket) {
-    char buffer[2048] = {0};  // Increased buffer size for larger requests
+    char buffer[2048] = {0};
     ssize_t bytes_received = read(client_socket, buffer, sizeof(buffer));
     if (bytes_received <= 0) {
         close(client_socket);
@@ -209,6 +210,7 @@ int main() {
         int client_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen);
         if (client_socket == -1) {
             std::cerr << "Couldn't accept connection" << std::endl;
+            continue;
         }
         std::cout << "Connection accepted" << std::endl;
         std::thread(handle_request, client_socket).detach();
