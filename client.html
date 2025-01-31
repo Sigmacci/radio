@@ -65,6 +65,7 @@
 		<select id="songList"></select>
 		<button onclick="playSong()">Play</button>
 		<audio id="audioPlayer" src="http://localhost:8081/" controls></audio>
+		<button onclick="skip()">Skip</button>
 	</div>
 
 	<script>
@@ -91,6 +92,20 @@
 		}
 
 		loadSongs();
+	
+		const audioPlayer = document.getElementById('audioPlayer');
+		async function skip() {
+			console.log('skip');
+			audioPlayer.currentTime = 0;
+			audioPlayer.load();
+			audioPlayer.play();
+			let response = await fetch('http://localhost:8080/skip');
+			if (response.ok) {
+				console.log(await response.json());
+			} else {
+				console.error('Failed to skip song:', response.statusText);
+			}
+		}
 	</script>
 </body>
 
