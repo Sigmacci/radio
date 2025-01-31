@@ -163,12 +163,12 @@ void audio_server_loop() {
             char buffer[bitrate];
             while (file.read(buffer, bitrate)) {
                 {
-					std::lock_guard<std::mutex> lock(skip_mutex);
-					if (skip) {
-						skip = false;
-						break;
-					}
-				}
+                    std::lock_guard<std::mutex> lock(skip_mutex);
+                    if (skip) {
+                        skip = false;
+                        break;
+                    }
+                }
                 int n = file.gcount();
                 {
                     std::lock_guard<std::mutex> lock(clients_mutex);
@@ -290,14 +290,14 @@ void handle_request(int client_socket) {
         std::string response = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\n\r\n";
         send(client_socket, response.c_str(), response.length(), 0);
     } else if (request.find("GET /skip") != std::string::npos) {
-		std::cout << "Skipping song" << std::endl;
-		{
-			std::lock_guard<std::mutex> lock(skip_mutex);
-			skip = true;
-		}
+        std::cout << "Skipping song" << std::endl;
+        {
+            std::lock_guard<std::mutex> lock(skip_mutex);
+            skip = true;
+        }
         std::string response = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
-		send(client_socket, response.c_str(), response.length(), 0);
-	} else {
+        send(client_socket, response.c_str(), response.length(), 0);
+    } else {
         std::string not_found = "HTTP/1.1 404 Not Found\r\n\r\n";
         send(client_socket, not_found.c_str(), not_found.length(), 0);
     }
