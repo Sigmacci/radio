@@ -21,8 +21,9 @@ namespace fs = std::filesystem;
 #define SOUND_CHUNK 16000
 
 std::mutex clients_mutex;
-std::mutex queue_mutex;
 std::vector<int> clients;
+
+std::mutex queue_mutex;
 std::vector<std::string> queue;
 
 std::string urlDecode(const std::string& encoded) {
@@ -46,36 +47,30 @@ std::string urlDecode(const std::string& encoded) {
     return decoded.str();
 }
 
+void load_song_names() {
+    for (const auto& entry : fs::directory_iterator(SONGS_DIR)) {
+        if (fs::is_regular_file(entry)) {
+            queue.push_back(entry.path().filename().string());
+            std::cout << "Loaded " << entry.path().filename() << std::endl;
+        }
+    }
+}
+
 std::string get_song_list() {
     std::ostringstream oss;
     oss << "[";
     bool first = true;
-    for (const auto& entry : fs::directory_iterator(SONGS_DIR)) {
-        if (fs::is_regular_file(entry)) {
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        for (const auto& entry : queue) {
             if (!first) oss << ",";
-            oss << "\"" << entry.path().filename().string() << "\"";
+            oss << "\"" << entry << "\"";
             first = false;
         }
     }
     oss << "]";
     return oss.str();
 }
-
-std::string get_queue() {
-	std::lock_guard<std::mutex> lock(queue_mutex);
-    std::ostringstream oss;
-    oss << "[";
-    bool first = true;
-    for (const auto& entry : queue) {
-		if (!first) oss << ",";
-		oss << "\"" << entry << "\"";
-		first = false;
-    }
-    oss << "]";
-	// queue_cv.notify_one();
-    return oss.str();
-}
-
 
 int getBitrate(const std::string& filename) {
     const int BITRATES[16] = {0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, -1};
@@ -107,8 +102,6 @@ void accept_audio_listener(int server_fd, struct sockaddr_in address) {
         socklen_t addrlen = sizeof(address);
         int client_socket = accept(server_fd, (struct sockaddr*)&address, &addrlen);
         if (client_socket != -1) {
-            std::cout << "Audio client connected" << std::endl;
-
             char buffer[1024];
             ssize_t bytes_received = read(client_socket, buffer, sizeof(buffer));
             if (bytes_received <= 0) {
@@ -145,43 +138,46 @@ void audio_server_loop() {
     accept_audio_thread.detach();
 
     while (true) {
-        while (true) {
-			std::string song = SONGS_DIR;
-			{
-				std::lock_guard<std::mutex> lock(queue_mutex);
-				if (queue.empty()) {
-					continue;
-				}
-				song += queue.front();
-				queue.erase(queue.begin());
-				// queue_cv.notify_one();
-			}
-            if (fs::is_regular_file(song)) {
-                std::cout << "Playing " << song << std::endl;
-                int bitrate = getBitrate(song);
-				if (bitrate == -1) {
-					bitrate = 128000;
-				}
-                std::cout << "Bit rate: " << bitrate << std::endl;
-
-                std::ifstream file(song, std::ios::in | std::ios::binary);
-                char buffer[bitrate];
-                while (file.read(buffer, bitrate)) {
-                    int n = file.gcount();
-                    {
-                        std::lock_guard<std::mutex> lock(clients_mutex);
-                        for (int client_socket : clients) {
-                            if (send(client_socket, buffer, n, 0) == -1) {
-                                std::cout << "Client disconnected" << std::endl;
-                                clients.erase(std::remove(clients.begin(), clients.end(), client_socket), clients.end());
-                            }
-                        }
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1000 * 8));
-                }
-                std::cout << "Sent to all clients" << std::endl;
-                file.close();
+        std::string song = SONGS_DIR;
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            if (queue.empty()) {
+                continue;
             }
+            std::string song_name = queue.front();
+            song += song_name;
+            queue.erase(queue.begin());
+            queue.push_back(song_name);
+        }
+        if (fs::is_regular_file(song)) {
+            std::cout << "Playing " << song << std::endl;
+            int bitrate = getBitrate(song);
+            if (bitrate == -1) {
+                bitrate = 128000;
+            }
+            std::cout << "Bit rate: " << bitrate << std::endl;
+            bitrate /= 8;
+
+            std::ifstream file(song, std::ios::in | std::ios::binary);
+            char buffer[bitrate];
+            while (file.read(buffer, bitrate)) {
+                int n = file.gcount();
+                {
+                    std::lock_guard<std::mutex> lock(clients_mutex);
+                    for (auto i = clients.begin(); i != clients.end();) {
+                        ssize_t byt = recv(*i, nullptr, 0, MSG_PEEK | MSG_DONTWAIT);
+                        if (byt == 0) {
+                            close(*i);
+                            i = clients.erase(i);
+                            continue;
+                        }
+                        send(*i, buffer, n, 0);
+                        ++i;
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            }
+            file.close();
         }
     }
 }
@@ -204,26 +200,18 @@ void handle_request(int client_socket) {
                  << song_list;
 
         send(client_socket, response.str().c_str(), response.str().length(), 0);
-    } else if (request.find("GET /queue") != std::string::npos) {
-		std::cout << "Sending queue: " << std::endl;
-		std::ostringstream response;
-		std::string song_list = get_queue();
-		std::cout << song_list << std::endl;
-		response << "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: "
-				 << song_list.size() << "\r\n\r\n" << song_list;
-		send(client_socket, response.str().c_str(), response.str().length(), 0);
-	} else if (request.find("GET /stream/") != std::string::npos) {
+    } else if (request.find("GET /stream/") != std::string::npos) {
         size_t pos = request.find("GET /stream/") + 12;
         std::string song_name = request.substr(pos, request.find(" ", pos) - pos);
-		song_name = urlDecode(song_name);
-		std::cout << "Adding " << song_name << " to queue" << std::endl;
-		{
-			std::lock_guard<std::mutex> lock(queue_mutex);
-			queue.push_back(song_name);
-		}
-		std::string response = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\n\r\n";
-		send(client_socket, response.c_str(), response.length(), 0);
-	}  else {
+        song_name = urlDecode(song_name);
+        std::cout << "Adding " << song_name << " to queue" << std::endl;
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            queue.push_back(song_name);
+        }
+        std::string response = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\n\r\n";
+        send(client_socket, response.c_str(), response.length(), 0);
+    } else {
         std::string not_found = "HTTP/1.1 404 Not Found\r\n\r\n";
         send(client_socket, not_found.c_str(), not_found.length(), 0);
     }
@@ -236,6 +224,9 @@ int main() {
     struct sockaddr_in address;
     int opt = 1;
     std::cout << "Server started" << std::endl;
+
+    load_song_names();
+    std::cout << "Loaded " << queue.size() << " songs" << std::endl;
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
