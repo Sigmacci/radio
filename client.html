@@ -2,7 +2,7 @@
 <html>
 
 <head>
-	<title>JP Radio - music non stop</title>
+	<title>Music Streamer</title>
 </head>
 
 <body>
@@ -11,6 +11,8 @@
 	<button onclick="playSong()">Play</button>
 	<audio id="audioPlayer" src="http://localhost:8081/" autoplay="false" controls></audio>
 
+    <br>
+    <select id="queue"></select>
 	<script>
 		console.log('client.js');
 		async function loadSongs() {
@@ -26,13 +28,31 @@
 			});
 		}
 
-		function playSong() {
+		async function playSong() {
 			console.log('playSong');
 			let song = document.getElementById('songList').value;
-			document.getElementById('audioPlayer').src = `http://localhost:8080/stream/${song}`;
+            const url = `http://localhost:8080/stream/${song}`;
+            console.log(await fetch(url));
+			// document.getElementById('audioPlayer').src = `http://localhost:8080/stream/${song}`;
 		}
 
 		loadSongs();
+        const queue = document.getElementById('queue');
+        queue.addEventListener('click', async () => {
+            while (queue.firstChild) {
+                queue.removeChild(queue.firstChild);
+            }
+            console.log('queue change');
+            let response = await fetch('http://localhost:8080/queue');
+            let list = await response.json();
+            console.log(JSON.stringify(list));
+            list.forEach(song => {
+                let option = document.createElement('option');
+                option.value = song;
+                option.textContent = song;
+                queue.appendChild(option);
+            });
+        });
 	</script>
 </body>
 
