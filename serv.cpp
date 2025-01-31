@@ -297,6 +297,23 @@ void handle_request(int client_socket) {
         }
         std::string response = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
         send(client_socket, response.c_str(), response.length(), 0);
+    } else if (request.find("GET /delete/") != std::string::npos) {
+        size_t pos = request.find("GET /delete/") + 12;
+        std::string song_name = request.substr(pos, request.find(" ", pos) - pos);
+        song_name = urlDecode(song_name);
+        std::cout << "Deleting song " << song_name << std::endl;
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            if (queue.back() == song_name) {
+                {
+                    std::lock_guard<std::mutex> lock(skip_mutex);
+                    skip = true;
+                }
+            }
+            queue.erase(std::remove(queue.begin(), queue.end(), song_name), queue.end());
+        }
+        std::string response = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\n\r\n";
+        send(client_socket, response.c_str(), response.length(), 0);
     } else {
         std::string not_found = "HTTP/1.1 404 Not Found\r\n\r\n";
         send(client_socket, not_found.c_str(), not_found.length(), 0);
