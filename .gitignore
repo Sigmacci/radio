@@ -34,3 +34,7 @@
 # Directories
 server/songs
 server/songs/*s
+
+songs/*
+.vscode/*
+.vscode*
