@@ -13,31 +13,66 @@
 		}
 
 		body {
-			background-color: var(--base-dark);
+			background-color: var(--base);
 			color: var(--text);
 			font-family: 'Roboto', sans-serif;
 			margin: 0;
 			padding: 0;
 		}
 
+		#center {
+			position: absolute;
+			top: 50%;
+			left: 50%;
+			transform: translate(-50%, -50%);
+			display: flex;
+			flex-direction: column;
+			justify-content: center;
+			align-items: center;
+			background-color: var(--base-dark);
+			padding: 24px 32px;
+			border-radius: 24px;
+			box-shadow: rgba(0, 0, 0, 0.575) 4px 4px 16px;
+			color: var(--text);
+		}
+
 		h1 {
 			text-align: center;
 		}
 
-		select {
+		table {
 			width: 100%;
-			padding: 10px;
-			margin: 10px 0;
+			border-collapse: collapse;
+			margin-bottom: 12px;
+			text-align: left;
+		}
+
+		th {
+			padding-bottom: 8px;
+		}
+
+		td {
+			padding: 4px 0;
+		}
+
+		#center div {
+			display: flex;
+			justify-content: center;
+			align-items: center;
+		}
+
+		input[type="file"] {
+			color: var(--accent-2);
 		}
 
 		button {
 			width: 100%;
 			padding: 10px;
 			margin: 10px 0;
-			background-color: #4CAF50;
-			color: white;
+			background-color: var(--accent-2);
 			border: none;
 			cursor: pointer;
+			border-radius: 8px;
 		}
 
 		button:hover {
@@ -52,9 +87,9 @@
 </head>
 
 <body>
-	<div>
+	<div id="center">
 		<h1>Music Player</h1>
-		<table>
+		<table id="songTable">
 			<tr>
 				<th>Track Name</th>
 			</tr>
@@ -62,33 +97,51 @@
 				<td>EGG</td>
 			</tr>
 		</table>
-		<select id="songList"></select>
-		<button onclick="playSong()">Play</button>
+		<div>
+			<form id="inputForm" enctype="multipart/form-data">
+				<input type="file" name="song" id="songInput" accept="audio/*">
+				<button type="submit">Add Song</button>
+			</form>
+		</div>
 		<audio id="audioPlayer" src="http://localhost:8081/" controls></audio>
 	</div>
 
 	<script>
+		var songs = [];
+
 		async function loadSongs() {
 			console.log('loadSongs');
 			let response = await fetch('http://localhost:8080/songs');
-			let songs = await response.json();
-			console.log(songs);
-			let songList = document.getElementById('songList');
+			let res = await response.json();
+			songs = res;
+			let songTable = document.getElementById('songTable');
+			songTable.innerHTML = '';
+
+			let header = document.createElement('tr');
+			let headerCell = document.createElement('th');
+			headerCell.textContent = 'Track Name';
+			header.appendChild(headerCell);
+			songTable.appendChild(header);
+
 			songs.forEach(song => {
-				let option = document.createElement('option');
-				option.value = song;
-				option.textContent = song;
-				songList.appendChild(option);
+				let row = document.createElement('tr');
+				let cell = document.createElement('td');
+				cell.textContent = song;
+				row.appendChild(cell);
+				songTable.appendChild(row);
 			});
 		}
 
-		async function playSong() {
-			console.log('playSong');
-			let song = document.getElementById('songList').value;
-			const url = `http://localhost:8080/stream/${song}`;
-			console.log(await fetch(url));
-			// document.getElementById('audioPlayer').src = `http://localhost:8080/stream/${song}`;
+		async function uploadSong(e) {
+			e.preventDefault();
+			await fetch('http://localhost:8080/upload', {
+				method: 'POST',
+				body: new FormData(this)
+			});
+			loadSongs();
 		}
+
+		document.getElementById('inputForm').addEventListener('submit', uploadSong);
 
 		loadSongs();
 	</script>

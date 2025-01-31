@@ -200,15 +200,85 @@ void handle_request(int client_socket) {
                  << song_list;
 
         send(client_socket, response.str().c_str(), response.str().length(), 0);
-    } else if (request.find("GET /stream/") != std::string::npos) {
-        size_t pos = request.find("GET /stream/") + 12;
-        std::string song_name = request.substr(pos, request.find(" ", pos) - pos);
-        song_name = urlDecode(song_name);
-        std::cout << "Adding " << song_name << " to queue" << std::endl;
-        {
-            std::lock_guard<std::mutex> lock(queue_mutex);
-            queue.push_back(song_name);
+    } else if (request.find("POST /upload") != std::string::npos) {
+        std::cout << "Uploading song" << std::endl;
+
+        // Boundary
+        std::string boundary;
+        size_t boundary_pos = request.find("boundary=");
+        if (boundary_pos != std::string::npos) {
+            boundary = "--" + request.substr(boundary_pos + 9);
+            boundary = boundary.substr(0, boundary.find("\r\n"));
+        } else {
+            std::cerr << "No boundary" << std::endl;
+            close(client_socket);
+            return;
         }
+
+        // Filename
+        size_t filename_pos = request.find("filename=\"");
+        if (filename_pos == std::string::npos) {
+            std::cerr << "No filename" << std::endl;
+            close(client_socket);
+            return;
+        }
+        filename_pos += 10;
+        size_t filename_end = request.find("\"", filename_pos);
+        std::string filename = request.substr(filename_pos, filename_end - filename_pos);
+
+        // Content start
+        size_t file_start = request.find("\r\n\r\n", filename_end);
+        if (file_start == std::string::npos) {
+            std::cerr << "Start not found" << std::endl;
+            close(client_socket);
+            return;
+        }
+        file_start += 4;
+
+        // Content length
+        size_t content_lenght_pos = request.find("Content-Length: ");
+        if (content_lenght_pos == std::string::npos) {
+            std::cerr << "Content length not found" << std::endl;
+            close(client_socket);
+            return;
+        }
+        content_lenght_pos += 16;
+        size_t content_length_end = request.find("\r\n", content_lenght_pos);
+        std::string content_length_str = request.substr(content_lenght_pos, content_length_end - content_lenght_pos);
+        size_t content_length = std::stoul(content_length_str);
+
+        bytes_received -= file_start;
+        content_length -= bytes_received;
+        while (content_length > 0) {
+            bytes_received = recv(client_socket, buffer, std::min(content_length, sizeof(buffer)), MSG_DONTWAIT);
+            if (bytes_received <= 0) {
+                break;
+            }
+            request += std::string(buffer, bytes_received);
+            content_length -= bytes_received;
+        }
+
+        // EOF
+        size_t file_end = request.find(boundary, file_start);
+        if (file_end == std::string::npos) {
+            std::cerr << "End not found" << std::endl;
+            close(client_socket);
+            return;
+        }
+        file_end -= 2;
+
+        std::string file_content = request.substr(file_start, file_end - file_start);
+        std::ofstream file(SONGS_DIR + filename, std::ios::binary);
+        if (!file) {
+            std::cerr << "File failed" << std::endl;
+            close(client_socket);
+            return;
+        }
+        file.write(file_content.c_str(), file_content.size());
+        file.close();
+
+        std::cout << "File saved: " << filename << std::endl;
+
         std::string response = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\n\r\n";
         send(client_socket, response.c_str(), response.length(), 0);
     } else {
