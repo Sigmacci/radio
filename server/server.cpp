@@ -154,7 +154,7 @@ void audio_server_loop() {
             std::cout << "Playing " << song << std::endl;
             int bitrate = getBitrate(song);
             if (bitrate == -1) {
-                bitrate = 128000;
+                bitrate = 192000;
             }
             std::cout << "Bit rate: " << bitrate << std::endl;
             bitrate /= 8;
@@ -286,6 +286,11 @@ void handle_request(int client_socket) {
         file.close();
 
         std::cout << "File saved: " << filename << std::endl;
+
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            queue.insert(queue.begin(), filename);
+        }
 
         std::string response = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\n\r\n";
         send(client_socket, response.c_str(), response.length(), 0);
